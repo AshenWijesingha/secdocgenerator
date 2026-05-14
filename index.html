@@ -554,22 +554,26 @@
             // Google Slides
             m = cleaned.match(/docs\.google\.com\/presentation\/d\/([a-zA-Z0-9_-]+)/);
             if (m) return 'https://docs.google.com/presentation/d/' + m[1] + '/embed?start=false&loop=false&delayms=3000';
-            // Google Drive files
-            m = cleaned.match(/(?:drive|docs)\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
-            if (m) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
-            // Google Drive open?id=... or uc?id=... links
-            let driveQueryId = null;
+            let parsed = null;
             try {
-                const parsed = new URL(cleaned);
-                const normalizedPath = parsed.pathname.replace(/\/$/, '');
-                if (parsed.hostname === 'drive.google.com' && (normalizedPath === '/open' || normalizedPath === '/uc')) {
-                    driveQueryId = parsed.searchParams.get('id');
-                }
+                parsed = new URL(cleaned);
             } catch (e) {
-                // Skip invalid URLs; fallback is handled later.
-                driveQueryId = null;
+                parsed = null;
             }
-            if (driveQueryId) return 'https://drive.google.com/file/d/' + driveQueryId + '/preview';
+            if (parsed) {
+                const host = parsed.hostname;
+                if (host === 'drive.google.com' || host === 'docs.google.com') {
+                    const fileMatch = parsed.pathname.match(/^\/file\/d\/([a-zA-Z0-9_-]+)/);
+                    if (fileMatch) return 'https://drive.google.com/file/d/' + fileMatch[1] + '/preview';
+                }
+                if (host === 'drive.google.com') {
+                    const normalizedPath = parsed.pathname.replace(/\/$/, '');
+                    if (normalizedPath === '/open' || normalizedPath === '/uc') {
+                        const driveQueryId = parsed.searchParams.get('id');
+                        if (driveQueryId) return 'https://drive.google.com/file/d/' + driveQueryId + '/preview';
+                    }
+                }
+            }
             return cleaned;
         }
 
