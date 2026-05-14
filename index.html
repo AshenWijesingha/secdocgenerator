@@ -540,9 +540,16 @@
         /* ===== CONVERT URL TO EMBED ===== */
         function toEmbedUrl(rawUrl) {
             const cleaned = rawUrl.trim();
-            const hasPreview = /\/preview\b/.test(cleaned);
-            const hasEmbed = /\/embed\b/.test(cleaned);
-            const hasPublished = /\/pubhtml\b/.test(cleaned) || /\/pub(\?|$)/.test(cleaned);
+            let parsed = null;
+            try {
+                parsed = new URL(cleaned);
+            } catch (e) {
+                parsed = null;
+            }
+            const pathToCheck = parsed ? parsed.pathname : cleaned;
+            const hasPreview = /\/preview\b/.test(pathToCheck);
+            const hasEmbed = /\/embed\b/.test(pathToCheck);
+            const hasPublished = /\/pubhtml\b/.test(pathToCheck) || /\/pub(?:\/|$)/.test(pathToCheck);
             const isAlreadyEmbeddable = hasPreview || hasEmbed || hasPublished;
             if (isAlreadyEmbeddable) return cleaned;
             // Google Docs
@@ -554,12 +561,6 @@
             // Google Slides
             m = cleaned.match(/docs\.google\.com\/presentation\/d\/([a-zA-Z0-9_-]+)/);
             if (m) return 'https://docs.google.com/presentation/d/' + m[1] + '/embed?start=false&loop=false&delayms=3000';
-            let parsed = null;
-            try {
-                parsed = new URL(cleaned);
-            } catch (e) {
-                parsed = null;
-            }
             if (parsed) {
                 const host = parsed.hostname;
                 if (host === 'drive.google.com' || host === 'docs.google.com') {
@@ -568,7 +569,7 @@
                 }
                 if (host === 'drive.google.com') {
                     const normalizedPath = parsed.pathname.replace(/\/$/, '');
-                    if (normalizedPath === '/open' || normalizedPath === '/uc') {
+                    if (normalizedPath === '/open' || normalizedPath === '/uc' || normalizedPath.startsWith('/open/') || normalizedPath.startsWith('/uc/')) {
                         const driveQueryId = parsed.searchParams.get('id');
                         if (driveQueryId) return 'https://drive.google.com/file/d/' + driveQueryId + '/preview';
                     }
