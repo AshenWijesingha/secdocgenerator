@@ -565,7 +565,7 @@
                     driveQueryId = parsed.searchParams.get('id');
                 }
             } catch (e) {
-                // Ignore invalid URLs; the input validation gates entry.
+                // Ignore invalid URLs and fall back to the raw link.
                 driveQueryId = null;
             }
             if (driveQueryId) return 'https://drive.google.com/file/d/' + driveQueryId + '/preview';
