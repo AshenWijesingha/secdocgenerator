@@ -561,11 +561,12 @@
             let driveQueryId = null;
             try {
                 const parsed = new URL(cleaned);
-                if (parsed.hostname === 'drive.google.com' && (parsed.pathname === '/open' || parsed.pathname === '/uc')) {
+                const normalizedPath = parsed.pathname.replace(/\/$/, '');
+                if (parsed.hostname === 'drive.google.com' && (normalizedPath === '/open' || normalizedPath === '/uc')) {
                     driveQueryId = parsed.searchParams.get('id');
                 }
             } catch (e) {
-                // Ignore invalid URLs and fall back to the cleaned URL.
+                // Skip invalid URLs; fallback is handled later.
                 driveQueryId = null;
             }
             if (driveQueryId) return 'https://drive.google.com/file/d/' + driveQueryId + '/preview';
