@@ -540,7 +540,10 @@
         /* ===== CONVERT URL TO EMBED ===== */
         function toEmbedUrl(rawUrl) {
             const cleaned = rawUrl.trim();
-            const isDirectEmbed = /\/(preview|embed)\b/.test(cleaned) || /\/pubhtml\b/.test(cleaned) || /\/pub(\?|$)/.test(cleaned);
+            const hasPreview = /\/preview\b/.test(cleaned);
+            const hasEmbed = /\/embed\b/.test(cleaned);
+            const hasPublished = /\/pubhtml\b/.test(cleaned) || /\/pub(\?|$)/.test(cleaned);
+            const isDirectEmbed = hasPreview || hasEmbed || hasPublished;
             if (isDirectEmbed) return cleaned;
             // Google Docs
             let m = cleaned.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
@@ -554,7 +557,7 @@
             // Google Drive files
             m = cleaned.match(/(?:drive|docs)\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
             if (m) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
-            // Google Drive open/uc links
+            // Google Drive open?id=... or uc?id=... links
             m = cleaned.match(/drive\.google\.com\/(?:open|uc)\?(?:[^#]*&)?id=([a-zA-Z0-9_-]+)/);
             if (m) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
             return cleaned;
