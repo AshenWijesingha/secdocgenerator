@@ -351,7 +351,7 @@
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
                                 <span id="urlStatusText"></span>
                             </div>
-                            <div class="field-hint">Supports Google Docs, Sheets, Slides, and published document links.</div>
+                            <div class="field-hint">Supports Google Docs, Sheets, Slides, and Google Drive file links (PDF, DOCX).</div>
                         </div>
                     </div>
 
@@ -539,18 +539,24 @@
 
         /* ===== CONVERT URL TO EMBED ===== */
         function toEmbedUrl(rawUrl) {
+            const cleaned = rawUrl.trim();
+            if (/\/(preview|embed)\b/.test(cleaned) || /\/pubhtml\b/.test(cleaned) || /\/pub(\?|$)/.test(cleaned)) return cleaned;
             // Google Docs
-            let m = rawUrl.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
-            if (m) return 'https://docs.google.com/document/d/' + m[1] + '/pub?embedded=true';
+            let m = cleaned.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
+            if (m) return 'https://docs.google.com/document/d/' + m[1] + '/preview';
             // Google Sheets
-            m = rawUrl.match(/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
-            if (m) return 'https://docs.google.com/spreadsheets/d/' + m[1] + '/pubhtml?widget=true&headers=false';
+            m = cleaned.match(/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+            if (m) return 'https://docs.google.com/spreadsheets/d/' + m[1] + '/preview';
             // Google Slides
-            m = rawUrl.match(/docs\.google\.com\/presentation\/d\/([a-zA-Z0-9_-]+)/);
+            m = cleaned.match(/docs\.google\.com\/presentation\/d\/([a-zA-Z0-9_-]+)/);
             if (m) return 'https://docs.google.com/presentation/d/' + m[1] + '/embed?start=false&loop=false&delayms=3000';
-            // Already a /pub link
-            if (/\/pub(\?|$)/.test(rawUrl)) return rawUrl;
-            return rawUrl;
+            // Google Drive files
+            m = cleaned.match(/(?:drive|docs)\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
+            if (m) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+            // Google Drive open/uc links
+            m = cleaned.match(/drive\.google\.com\/(?:open|uc)\?[^#]*id=([a-zA-Z0-9_-]+)/);
+            if (m) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+            return cleaned;
         }
 
         /* ===== XOR ENCRYPT ===== */
