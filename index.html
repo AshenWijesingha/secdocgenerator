@@ -602,8 +602,8 @@
             const wmText = (document.getElementById('watermarkText').value || 'CONFIDENTIAL • VIEW ONLY').trim();
             
             // Validate inputs
-            if (!validateInputs(title, owner, wmText)) {
-                alert('Please check your inputs: Title and Owner are required, and all fields must be under 500 characters.');
+            if (!validateInputs(rawUrl, title, owner, wmText)) {
+                alert('Please check your inputs: URL, Title and Owner are required, and all fields must be under 500 characters. URL must start with http:// or https://');
                 return;
             }
             
@@ -891,10 +891,14 @@
         }
         
         // Validate user inputs
-        function validateInputs(title, owner, watermark) {
+        function validateInputs(url, title, owner, watermark) {
             const maxLen = 500;
-            if (!title || title.length === 0 || title.length > maxLen) return false;
-            if (!owner || owner.length === 0 || owner.length > maxLen) return false;
+            // Validate URL - must be a valid HTTPS URL
+            if (!url || !url.trim() || !/^https?:\/\/.+/.test(url.trim())) return false;
+            // Validate title and owner - required and within length limit
+            if (!title || title.length > maxLen) return false;
+            if (!owner || owner.length > maxLen) return false;
+            // Validate watermark - optional but must be within length limit if provided
             if (watermark && watermark.length > maxLen) return false;
             return true;
         }
