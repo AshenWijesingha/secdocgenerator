@@ -346,7 +346,7 @@
                         <div class="section-label"><div class="num">1</div> Document Source</div>
                         <div class="field">
                             <label>Google Docs URL <span class="req">*</span></label>
-                            <input type="url" id="docUrl" placeholder="https://docs.google.com/document/d/..." maxlength="2048">
+                            <input type="url" id="docUrl" placeholder="https://docs.google.com/document/d/..." maxlength="500">
                             <div class="url-status" id="urlStatus">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
                                 <span id="urlStatusText"></span>
@@ -603,7 +603,7 @@
             
             // Validate inputs
             if (!validateInputs(rawUrl, title, owner, wmText)) {
-                alert('Please check your inputs: URL, Title and Owner are required, and all fields must be under 500 characters. URL must start with http:// or https://');
+                alert('Please check your inputs: URL, Title, and Owner are required and must be valid. All fields must be under 500 characters. URLs must use http:// or https://');
                 return;
             }
             
@@ -893,13 +893,26 @@
         // Validate user inputs
         function validateInputs(url, title, owner, watermark) {
             const maxLen = 500;
-            // Validate URL - must be a valid HTTPS URL
-            if (!url || !url.trim() || !/^https?:\/\/.+/.test(url.trim())) return false;
+            // Validate URL - must be a valid HTTPS URL with proper hostname
+            if (!url || !url.trim()) return false;
+            url = url.trim();
+            // Prevent javascript:, data:, and other dangerous protocols
+            if (/^(javascript|data|vbscript|file|blob):/i.test(url)) return false;
+            // Use URL constructor for proper URL validation
+            try {
+                const urlObj = new URL(url);
+                // Only allow http and https protocols
+                if (!['http:', 'https:'].includes(urlObj.protocol)) return false;
+                // Ensure URL is not too long
+                if (url.length > maxLen) return false;
+            } catch (e) {
+                return false;
+            }
             // Validate title and owner - required and within length limit
             if (!title || title.length > maxLen) return false;
             if (!owner || owner.length > maxLen) return false;
             // Validate watermark - optional but must be within length limit if provided
-            if (watermark && watermark.length > maxLen) return false;
+            if (watermark && watermark.trim().length > maxLen) return false;
             return true;
         }
 
