@@ -609,8 +609,8 @@
             }
             
             // Ensure sessionMin is within valid range
-            if (sessionMin < 5) sessionMin = 5;
-            if (sessionMin > 120) sessionMin = 120;
+            if (sessionMin < MIN_SESSION_DURATION) sessionMin = MIN_SESSION_DURATION;
+            if (sessionMin > MAX_SESSION_DURATION) sessionMin = MAX_SESSION_DURATION;
 
             const useCopyProtect = isOn('copyProtect');
             const useScreenshot = isOn('screenshotProtect');
@@ -887,15 +887,18 @@
         };
 
         /* ===== HELPERS ===== */
+        const HTML_ESCAPE_MAP = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        };
+        const MIN_SESSION_DURATION = 5;
+        const MAX_SESSION_DURATION = 120;
+        
         function escH(s) {
-            const map = {
-                '&': '&amp;',
-                '<': '&lt;',
-                '>': '&gt;',
-                '"': '&quot;',
-                "'": '&#39;'
-            };
-            return s.replace(/[&<>"']/g, c => map[c]);
+            return s.replace(/[&<>"']/g, c => HTML_ESCAPE_MAP[c]);
         }
         
         // Validate user inputs - returns { valid: bool, error: string or null }
