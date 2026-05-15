@@ -346,7 +346,7 @@
                         <div class="section-label"><div class="num">1</div> Document Source</div>
                         <div class="field">
                             <label>Google Docs URL <span class="req">*</span></label>
-                            <input type="url" id="docUrl" placeholder="https://docs.google.com/document/d/...">
+                            <input type="url" id="docUrl" placeholder="https://docs.google.com/document/d/..." maxlength="500">
                             <div class="url-status" id="urlStatus">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
                                 <span id="urlStatusText"></span>
@@ -361,11 +361,11 @@
                         <div class="row-2">
                             <div class="field">
                                 <label>Document Title <span class="req">*</span></label>
-                                <input type="text" id="docTitle" placeholder="e.g. Q4 Strategy Report">
+                                <input type="text" id="docTitle" placeholder="e.g. Q4 Strategy Report" maxlength="500">
                             </div>
                             <div class="field">
                                 <label>Owner Name <span class="req">*</span></label>
-                                <input type="text" id="docOwner" placeholder="e.g. Ashen Wijesingha">
+                                <input type="text" id="docOwner" placeholder="e.g. Ashen Wijesingha" maxlength="500">
                             </div>
                         </div>
                         <div class="row-3">
@@ -393,7 +393,7 @@
                         </div>
                         <div class="field" style="margin-top:14px">
                             <label>Watermark Text</label>
-                            <input type="text" id="watermarkText" placeholder="CONFIDENTIAL • VIEW ONLY" value="CONFIDENTIAL • VIEW ONLY">
+                            <input type="text" id="watermarkText" placeholder="CONFIDENTIAL • VIEW ONLY" value="CONFIDENTIAL • VIEW ONLY" maxlength="500">
                         </div>
                     </div>
 
@@ -598,8 +598,19 @@
             const owner = docOwnerInput.value.trim();
             const classification = document.getElementById('docClassification').value;
             const access = document.getElementById('docAccess').value;
-            const sessionMin = parseInt(document.getElementById('sessionDuration').value) || 30;
-            const wmText = document.getElementById('watermarkText').value || 'CONFIDENTIAL • VIEW ONLY';
+            let sessionMin = parseInt(document.getElementById('sessionDuration').value) || 30;
+            const wmText = (document.getElementById('watermarkText').value || 'CONFIDENTIAL • VIEW ONLY').trim();
+            
+            // Validate inputs
+            const validation = validateInputs(rawUrl, title, owner, wmText);
+            if (!validation.valid) {
+                alert(validation.error);
+                return;
+            }
+            
+            // Ensure sessionMin is within valid range
+            if (sessionMin < MIN_SESSION_DURATION) sessionMin = MIN_SESSION_DURATION;
+            if (sessionMin > MAX_SESSION_DURATION) sessionMin = MAX_SESSION_DURATION;
 
             const useCopyProtect = isOn('copyProtect');
             const useScreenshot = isOn('screenshotProtect');
@@ -876,8 +887,44 @@
         };
 
         /* ===== HELPERS ===== */
+        const HTML_ESCAPE_MAP = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        };
+        const MIN_SESSION_DURATION = 5;
+        const MAX_SESSION_DURATION = 120;
+        const MAX_INPUT_LENGTH = 500;
+        
         function escH(s) {
-            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            if (!s) return '';
+            return s.replace(/[&<>"']/g, c => HTML_ESCAPE_MAP[c]);
+        }
+        
+        // Validate user inputs - returns { valid: bool, error: string or null }
+        function validateInputs(url, title, owner, watermark) {
+            // Validate URL
+            if (!url || !url.trim()) return { valid: false, error: 'URL is required' };
+            url = url.trim();
+            if (url.length > MAX_INPUT_LENGTH) return { valid: false, error: 'URL must not exceed ' + MAX_INPUT_LENGTH + ' characters' };
+            // Use URL constructor for proper URL validation first
+            try {
+                const urlObj = new URL(url);
+                // Only allow http and https protocols
+                if (!['http:', 'https:'].includes(urlObj.protocol)) return { valid: false, error: 'Only HTTP and HTTPS protocols are allowed' };
+            } catch (e) {
+                return { valid: false, error: 'Invalid URL format' };
+            }
+            // Validate title and owner - required and within length limit
+            if (!title) return { valid: false, error: 'Title is required' };
+            if (title.length > MAX_INPUT_LENGTH) return { valid: false, error: 'Title must not exceed ' + MAX_INPUT_LENGTH + ' characters' };
+            if (!owner) return { valid: false, error: 'Owner is required' };
+            if (owner.length > MAX_INPUT_LENGTH) return { valid: false, error: 'Owner must not exceed ' + MAX_INPUT_LENGTH + ' characters' };
+            // Validate watermark - optional but must be within length limit if provided
+            if (watermark && watermark.length > MAX_INPUT_LENGTH) return { valid: false, error: 'Watermark must not exceed ' + MAX_INPUT_LENGTH + ' characters' };
+            return { valid: true, error: null };
         }
 
         window.copyCode = function() {
