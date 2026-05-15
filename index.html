@@ -896,6 +896,7 @@
         };
         const MIN_SESSION_DURATION = 5;
         const MAX_SESSION_DURATION = 120;
+        const MAX_INPUT_LENGTH = 500;
         
         function escH(s) {
             return s.replace(/[&<>"']/g, c => HTML_ESCAPE_MAP[c]);
@@ -903,14 +904,11 @@
         
         // Validate user inputs - returns { valid: bool, error: string or null }
         function validateInputs(url, title, owner, watermark) {
-            const maxLen = 500;
             // Validate URL
             if (!url || !url.trim()) return { valid: false, error: 'URL is required' };
             url = url.trim();
-            if (url.length > maxLen) return { valid: false, error: 'URL must be under 500 characters' };
-            // Prevent javascript:, data:, and other dangerous protocols
-            if (/^(javascript|data|vbscript|file|blob):/i.test(url)) return { valid: false, error: 'URL protocol not allowed' };
-            // Use URL constructor for proper URL validation
+            if (url.length > MAX_INPUT_LENGTH) return { valid: false, error: 'URL must be under ' + MAX_INPUT_LENGTH + ' characters' };
+            // Use URL constructor for proper URL validation first
             try {
                 const urlObj = new URL(url);
                 // Only allow http and https protocols
@@ -918,13 +916,13 @@
             } catch (e) {
                 return { valid: false, error: 'Invalid URL format' };
             }
-            // Validate title and owner
-            if (!title || title.length === 0) return { valid: false, error: 'Title is required' };
-            if (title.length > maxLen) return { valid: false, error: 'Title must be under 500 characters' };
-            if (!owner || owner.length === 0) return { valid: false, error: 'Owner is required' };
-            if (owner.length > maxLen) return { valid: false, error: 'Owner must be under 500 characters' };
+            // Validate title and owner - required and within length limit
+            if (!title) return { valid: false, error: 'Title is required' };
+            if (title.length > MAX_INPUT_LENGTH) return { valid: false, error: 'Title must be under ' + MAX_INPUT_LENGTH + ' characters' };
+            if (!owner) return { valid: false, error: 'Owner is required' };
+            if (owner.length > MAX_INPUT_LENGTH) return { valid: false, error: 'Owner must be under ' + MAX_INPUT_LENGTH + ' characters' };
             // Validate watermark - optional but must be within length limit if provided
-            if (watermark && watermark.length > maxLen) return { valid: false, error: 'Watermark must be under 500 characters' };
+            if (watermark && watermark.length > MAX_INPUT_LENGTH) return { valid: false, error: 'Watermark must be under ' + MAX_INPUT_LENGTH + ' characters' };
             return { valid: true, error: null };
         }
 
