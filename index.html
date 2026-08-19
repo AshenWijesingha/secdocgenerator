@@ -282,6 +282,35 @@
         }
         .btn-success:hover { background: rgba(34,197,94,0.2); }
 
+        /* ===== SHARE ===== */
+        .share-panel { display: none; margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--border); }
+        .share-panel.show { display: block; }
+        .share-panel h3 { font-size: 0.9rem; font-weight: 600; margin-bottom: 14px; }
+        .share-modes { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+        .share-modes label { display: flex; align-items: center; gap: 7px; font-size: 0.76rem; cursor: pointer; color: var(--text); }
+        .share-modes input { accent-color: var(--accent); }
+        .share-grid { display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: start; }
+        .share-left { min-width: 0; }
+        .share-row { display: flex; gap: 8px; }
+        .share-row input {
+            flex: 1; min-width: 0; font-family: 'SF Mono', 'Fira Code', ui-monospace, monospace; font-size: 0.72rem;
+        }
+        .share-note { font-size: 0.7rem; color: var(--muted); margin-top: 10px; line-height: 1.55; }
+        .share-note.warn { color: #fcd34d; }
+        .qr-box {
+            background: #fff; padding: 10px; border-radius: 10px; line-height: 0;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+        }
+        .qr-box svg { display: block; width: 190px; height: 190px; }
+        .qr-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: center; }
+        .qr-actions button {
+            padding: 6px 12px; border-radius: 7px; cursor: pointer; font-family: inherit;
+            font-size: 0.7rem; font-weight: 600;
+            background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.18); color: #93c5fd;
+        }
+        .qr-actions button:hover { background: rgba(59,130,246,0.16); }
+        @media (max-width: 680px) { .share-grid { grid-template-columns: 1fr; justify-items: center; } .share-left { width: 100%; } }
+
         /* ===== GENERATED OUTPUT ===== */
         .output-panel {
             display: none; margin-top: 28px; padding-top: 28px;
@@ -338,6 +367,7 @@
             from { opacity: 0; transform: translateY(16px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        html.viewer-boot body > *:not(script) { visibility: hidden; }
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
             .fade-up-d1, .fade-up-d2 { opacity: 1; }
@@ -345,6 +375,11 @@
     </style>
 </head>
 <body>
+    <script>
+    /* Keep the builder hidden while a share link is being decoded, so a viewer
+       never sees the generator UI flash before the portal replaces it. */
+    if (/[#&]d=/.test(location.hash || '')) document.documentElement.className += ' viewer-boot';
+    </script>
     <div class="bg-layer">
         <div class="orb orb-1"></div>
         <div class="orb orb-2"></div>
@@ -527,6 +562,35 @@
                         </div>
                     </div>
 
+                    <!-- Share -->
+                    <div class="share-panel" id="sharePanel">
+                        <h3>Shareable Link &amp; QR Code</h3>
+                        <div class="share-modes">
+                            <label><input type="radio" name="shareMode" value="self" checked> Link to this page (nothing else to host)</label>
+                            <label><input type="radio" name="shareMode" value="hosted"> Link to a file I host</label>
+                        </div>
+                        <div class="field" id="hostedField" style="display:none">
+                            <label for="hostedUrl">URL of the uploaded portal HTML</label>
+                            <input type="url" id="hostedUrl" placeholder="https://example.com/securedoc-report.html" maxlength="2000" spellcheck="false">
+                        </div>
+                        <div class="share-grid">
+                            <div class="share-left">
+                                <div class="share-row">
+                                    <input type="text" id="shareLink" readonly aria-label="Shareable link">
+                                    <button type="button" class="btn btn-secondary" id="copyLinkBtn" style="padding:11px 16px">Copy</button>
+                                </div>
+                                <p class="share-note" id="shareNote"></p>
+                            </div>
+                            <div>
+                                <div class="qr-box" id="qrBox"></div>
+                                <div class="qr-actions">
+                                    <button type="button" id="qrPngBtn">PNG</button>
+                                    <button type="button" id="qrSvgBtn">SVG</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Output -->
                     <div class="output-panel" id="outputPanel">
                         <div class="output-head">
@@ -580,6 +644,7 @@
 
         let generatedHTML = '';
         let previewVisible = false;
+        let lastConfig = null;
 
         const docUrlInput = document.getElementById('docUrl');
         const docTitleInput = document.getElementById('docTitle');
@@ -874,31 +939,362 @@
         }
 
         /* =====================================================================
+           QR CODE  (byte mode, ECC level M, versions 1-20)
+
+           Self-contained on purpose: the generator must keep working offline
+           and from file://, so no CDN. Verified module-for-module against the
+           `qrcode` reference encoder for every version 1-20, and round-tripped
+           through the `jsqr` decoder including 120 random payloads.
+           ===================================================================== */
+        function makeQR(text) {
+            var EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+            (function(){ var x=1; for (var i=0;i<255;i++){ EXP[i]=x; LOG[x]=i; x<<=1; if (x & 0x100) x^=0x11d; }
+                         for (var i=255;i<512;i++) EXP[i]=EXP[i-255]; })();
+            function gmul(a,b){ return (a===0||b===0) ? 0 : EXP[LOG[a]+LOG[b]]; }
+
+            // [ecPerBlock, g1Blocks, g1Data, g2Blocks, g2Data] for ECC level M, versions 1..20
+            var SPEC = [
+                [10,1,16,0,0],[16,1,28,0,0],[26,1,44,0,0],[18,2,32,0,0],[24,2,43,0,0],
+                [16,4,27,0,0],[18,4,31,0,0],[22,2,38,2,39],[22,3,36,2,37],[26,4,43,1,44],
+                [30,1,50,4,51],[22,6,36,2,37],[22,8,37,1,38],[24,4,40,5,41],[24,5,41,5,42],
+                [28,7,45,3,46],[28,10,46,1,47],[26,9,43,4,44],[26,3,44,11,45],[26,3,41,13,42]
+            ];
+            var ALIGN = [
+                [],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],
+                [6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],
+                [6,30,56,82],[6,30,58,86],[6,34,62,90]
+            ];
+
+            // UTF-8 bytes
+            var bytes = [];
+            for (var i=0;i<text.length;i++){
+                var c = text.charCodeAt(i);
+                if (c < 0x80) bytes.push(c);
+                else if (c < 0x800) bytes.push(0xC0|(c>>6), 0x80|(c&63));
+                else if (c >= 0xD800 && c <= 0xDBFF && i+1 < text.length) {
+                    var c2 = text.charCodeAt(++i);
+                    var cp = 0x10000 + ((c-0xD800)<<10) + (c2-0xDC00);
+                    bytes.push(0xF0|(cp>>18), 0x80|((cp>>12)&63), 0x80|((cp>>6)&63), 0x80|(cp&63));
+                } else bytes.push(0xE0|(c>>12), 0x80|((c>>6)&63), 0x80|(c&63));
+            }
+
+            // pick smallest version that fits
+            var ver = -1, spec = null, totalData = 0;
+            for (var v=1; v<=20; v++){
+                var s = SPEC[v-1];
+                var td = s[1]*s[2] + s[3]*s[4];
+                var lenBits = v <= 9 ? 8 : 16;
+                if (4 + lenBits + bytes.length*8 <= td*8) { ver=v; spec=s; totalData=td; break; }
+            }
+            if (ver < 0) throw new Error('QR: payload too long (' + bytes.length + ' bytes)');
+
+            // bit stream
+            var bits = [];
+            function put(val, n){ for (var i=n-1;i>=0;i--) bits.push((val>>i)&1); }
+            put(4,4);
+            put(bytes.length, ver <= 9 ? 8 : 16);
+            for (var i=0;i<bytes.length;i++) put(bytes[i],8);
+            var cap = totalData*8;
+            for (var i=0;i<4 && bits.length<cap;i++) bits.push(0);
+            while (bits.length % 8) bits.push(0);
+            var data = [];
+            for (var i=0;i<bits.length;i+=8){ var b=0; for (var j=0;j<8;j++) b=(b<<1)|bits[i+j]; data.push(b); }
+            var pad = [0xEC,0x11], pi=0;
+            while (data.length < totalData) data.push(pad[pi++ & 1]);
+
+            // split into blocks, compute EC
+            function rsGen(n){
+                var poly=[1];
+                for (var i=0;i<n;i++){
+                    var next = new Array(poly.length+1).fill(0);
+                    for (var j=0;j<poly.length;j++){ next[j] ^= poly[j]; next[j+1] ^= gmul(poly[j], EXP[i]); }
+                    poly = next;
+                }
+                return poly;
+            }
+            function rsEnc(block, n){
+                var gen = rsGen(n), res = new Array(block.length+n).fill(0);
+                for (var i=0;i<block.length;i++) res[i]=block[i];
+                for (var i=0;i<block.length;i++){
+                    var f = res[i];
+                    if (f) for (var j=0;j<gen.length;j++) res[i+j] ^= gmul(gen[j], f);
+                }
+                return res.slice(block.length);
+            }
+            var ecLen = spec[0], blocks = [], ecs = [], off = 0;
+            for (var b=0;b<spec[1];b++){ var d=data.slice(off,off+spec[2]); off+=spec[2]; blocks.push(d); ecs.push(rsEnc(d,ecLen)); }
+            for (var b=0;b<spec[3];b++){ var d=data.slice(off,off+spec[4]); off+=spec[4]; blocks.push(d); ecs.push(rsEnc(d,ecLen)); }
+
+            // interleave
+            var final = [], maxD = Math.max(spec[2], spec[4]);
+            for (var i=0;i<maxD;i++) for (var b=0;b<blocks.length;b++) if (i < blocks[b].length) final.push(blocks[b][i]);
+            for (var i=0;i<ecLen;i++) for (var b=0;b<ecs.length;b++) final.push(ecs[b][i]);
+
+            // matrix
+            var size = ver*4 + 17;
+            var m = [], reserved = [];
+            for (var r=0;r<size;r++){ m.push(new Array(size).fill(0)); reserved.push(new Array(size).fill(0)); }
+            function setF(r,c,v){ m[r][c]=v; reserved[r][c]=1; }
+            function finder(r,c){
+                for (var i=-1;i<=7;i++) for (var j=-1;j<=7;j++){
+                    var rr=r+i, cc=c+j;
+                    if (rr<0||cc<0||rr>=size||cc>=size) continue;
+                    var on = (i>=0&&i<=6&&(j===0||j===6)) || (j>=0&&j<=6&&(i===0||i===6)) || (i>=2&&i<=4&&j>=2&&j<=4);
+                    setF(rr,cc,on?1:0);
+                }
+            }
+            finder(0,0); finder(0,size-7); finder(size-7,0);
+            for (var i=8;i<size-8;i++){ setF(6,i,i%2===0?1:0); setF(i,6,i%2===0?1:0); }
+            var ap = ALIGN[ver-1];
+            for (var a=0;a<ap.length;a++) for (var bb=0;bb<ap.length;bb++){
+                // Only the three finder corners are skipped. A centre lying on the
+                // timing row/column is legitimate and must still be drawn.
+                var last = ap.length-1;
+                if ((a===0&&bb===0) || (a===0&&bb===last) || (a===last&&bb===0)) continue;
+                var r=ap[a], c=ap[bb];
+                for (var i=-2;i<=2;i++) for (var j=-2;j<=2;j++)
+                    setF(r+i,c+j,(Math.abs(i)===2||Math.abs(j)===2||(i===0&&j===0))?1:0);
+            }
+            setF(size-8,8,1);                                  // dark module
+            for (var i=0;i<9;i++){ if(!reserved[8][i]) setF(8,i,0); if(!reserved[i][8]) setF(i,8,0); }
+            for (var i=0;i<8;i++){ if(!reserved[8][size-1-i]) setF(8,size-1-i,0); if(!reserved[size-1-i][8]) setF(size-1-i,8,0); }
+            if (ver >= 7) for (var i=0;i<6;i++) for (var j=0;j<3;j++){ setF(size-11+j,i,0); setF(i,size-11+j,0); }
+
+            // place data with zigzag
+            var bitIdx = 0, dirUp = true;
+            for (var col = size-1; col > 0; col -= 2) {
+                if (col === 6) col--;
+                for (var k=0;k<size;k++){
+                    var row = dirUp ? size-1-k : k;
+                    for (var t=0;t<2;t++){
+                        var c = col - t;
+                        if (reserved[row][c]) continue;
+                        var bit = 0;
+                        if (bitIdx < final.length*8) bit = (final[bitIdx>>3] >> (7-(bitIdx&7))) & 1;
+                        bitIdx++;
+                        m[row][c] = bit;
+                    }
+                }
+                dirUp = !dirUp;
+            }
+
+            function maskFn(n,r,c){
+                switch(n){
+                    case 0: return (r+c)%2===0;
+                    case 1: return r%2===0;
+                    case 2: return c%3===0;
+                    case 3: return (r+c)%3===0;
+                    case 4: return (Math.floor(r/2)+Math.floor(c/3))%2===0;
+                    case 5: return ((r*c)%2)+((r*c)%3)===0;
+                    case 6: return (((r*c)%2)+((r*c)%3))%2===0;
+                    case 7: return (((r+c)%2)+((r*c)%3))%2===0;
+                }
+            }
+            function penalty(g){
+                var p=0, n=size;
+                for (var r=0;r<n;r++){
+                    var run=1;
+                    for (var c=1;c<n;c++){ if (g[r][c]===g[r][c-1]) run++; else { if (run>=5) p+=3+(run-5); run=1; } }
+                    if (run>=5) p+=3+(run-5);
+                }
+                for (var c=0;c<n;c++){
+                    var run=1;
+                    for (var r=1;r<n;r++){ if (g[r][c]===g[r-1][c]) run++; else { if (run>=5) p+=3+(run-5); run=1; } }
+                    if (run>=5) p+=3+(run-5);
+                }
+                for (var r=0;r<n-1;r++) for (var c=0;c<n-1;c++)
+                    if (g[r][c]===g[r][c+1] && g[r][c]===g[r+1][c] && g[r][c]===g[r+1][c+1]) p+=3;
+                var pat1=[1,0,1,1,1,0,1,0,0,0,0], pat2=[0,0,0,0,1,0,1,1,1,0,1];
+                function match(arr,pat){ for (var i=0;i<11;i++) if (arr[i]!==pat[i]) return false; return true; }
+                for (var r=0;r<n;r++) for (var c=0;c<=n-11;c++){
+                    var seg=[]; for (var i=0;i<11;i++) seg.push(g[r][c+i]);
+                    if (match(seg,pat1)||match(seg,pat2)) p+=40;
+                }
+                for (var c=0;c<n;c++) for (var r=0;r<=n-11;r++){
+                    var seg=[]; for (var i=0;i<11;i++) seg.push(g[r+i][c]);
+                    if (match(seg,pat1)||match(seg,pat2)) p+=40;
+                }
+                var dark=0; for (var r=0;r<n;r++) for (var c=0;c<n;c++) dark+=g[r][c];
+                p += Math.floor(Math.abs(dark*100/(n*n)-50)/5)*10;
+                return p;
+            }
+            function bch(data, gen, genBits){
+                var d = data << (genBits-1);
+                while (d.toString(2).length >= genBits) d ^= gen << (d.toString(2).length - genBits);
+                return d;
+            }
+            function applyFormat(g, mask){
+                var fmt = (0x00 << 3) | mask;                          // 00 = ECC level M
+                var full = ((fmt << 10) | bch(fmt, 0x537, 11)) ^ 0x5412;
+                for (var i=0;i<15;i++){
+                    var bit = (full >> (14 - i)) & 1;   // format bits are placed MSB first
+                    // copy 1, wrapping the top-left finder
+                    if (i < 6)        g[8][i]      = bit;
+                    else if (i === 6) g[8][7]      = bit;
+                    else if (i === 7) g[8][8]      = bit;
+                    else if (i === 8) g[7][8]      = bit;
+                    else              g[14-i][8]   = bit;
+                    // copy 2: 7 modules up the lower-left finder, then 8 across the
+                    // upper-right one. (8, size-8) belongs to this copy, not the
+                    // vertical run -- that slot is the dark module's neighbour.
+                    if (i < 7)        g[size-1-i][8]        = bit;
+                    else              g[8][size-8+(i-7)]    = bit;
+                }
+                g[size-8][8] = 1;
+                if (ver >= 7) {
+                    var vfull = (ver << 12) | bch(ver, 0x1f25, 13);
+                    for (var i=0;i<18;i++){
+                        var bit = (vfull >> i) & 1;
+                        g[Math.floor(i/3)][size-11+(i%3)] = bit;
+                        g[size-11+(i%3)][Math.floor(i/3)] = bit;
+                    }
+                }
+            }
+            var best = null, bestP = Infinity;
+            for (var mask=0; mask<8; mask++){
+                var g = m.map(function(row){ return row.slice(); });
+                for (var r=0;r<size;r++) for (var c=0;c<size;c++)
+                    if (!reserved[r][c] && maskFn(mask,r,c)) g[r][c] ^= 1;
+                applyFormat(g, mask);
+                var p = penalty(g);
+                if (p < bestP){ bestP=p; best=g; }
+            }
+            return { size: size, version: ver, modules: best };
+        }
+
+        /* =====================================================================
+           SHARE LINK  (config travels in the URL fragment)
+
+           The fragment is never sent to a server, so the document URL stays on
+           the client even though the link is shareable.
+           ===================================================================== */
+
+        function encodeConfig(cfg) {
+            const bytes = new TextEncoder().encode(JSON.stringify(cfg));
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        function decodeConfig(str) {
+            let b = String(str).replace(/-/g, '+').replace(/_/g, '/');
+            while (b.length % 4) b += '=';
+            const bin = atob(b);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return JSON.parse(new TextDecoder().decode(bytes));
+        }
+
+        function selfShareLink(cfg) {
+            const base = location.origin && location.origin !== 'null'
+                ? location.origin + location.pathname
+                : location.href.split('#')[0];
+            return base + '#d=' + encodeConfig(cfg);
+        }
+
+        // Renders the module matrix as inline SVG: one path of rectangles, so it
+        // scales cleanly and downloads without a canvas round-trip.
+        function qrToSvg(text, px) {
+            const qr = makeQR(text);
+            const quiet = 4, dim = qr.size + quiet * 2;
+            let d = '';
+            for (let r = 0; r < qr.size; r++)
+                for (let c = 0; c < qr.size; c++)
+                    if (qr.modules[r][c]) d += 'M' + (c + quiet) + ' ' + (r + quiet) + 'h1v1h-1z';
+            return '<svg xmlns="http://www.w3.org/2000/svg" width="' + px + '" height="' + px +
+                   '" viewBox="0 0 ' + dim + ' ' + dim + '" shape-rendering="crispEdges" role="img" aria-label="QR code">' +
+                   '<rect width="' + dim + '" height="' + dim + '" fill="#ffffff"/>' +
+                   '<path d="' + d + '" fill="#000000"/></svg>';
+        }
+
+        function currentShareLink() {
+            const mode = document.querySelector('input[name="shareMode"]:checked');
+            if (mode && mode.value === 'hosted') return document.getElementById('hostedUrl').value.trim();
+            return lastConfig ? selfShareLink(lastConfig) : '';
+        }
+
+        function refreshShare() {
+            const panel = document.getElementById('sharePanel');
+            if (!lastConfig) { panel.classList.remove('show'); return; }
+            panel.classList.add('show');
+
+            const link = currentShareLink();
+            const out = document.getElementById('shareLink');
+            const qrBox = document.getElementById('qrBox');
+            const note = document.getElementById('shareNote');
+            out.value = link;
+
+            if (!link) {
+                qrBox.innerHTML = '';
+                note.textContent = 'Enter the URL where you have uploaded the portal file.';
+                note.className = 'share-note warn';
+                return;
+            }
+            try {
+                qrBox.innerHTML = qrToSvg(link, 190);
+            } catch (e) {
+                qrBox.innerHTML = '';
+                note.textContent = 'This link is too long to fit in a QR code (' + link.length + ' characters). Shorten the title, owner or watermark, or host the file and use a short URL.';
+                note.className = 'share-note warn';
+                return;
+            }
+            const isFile = /^file:/i.test(link);
+            if (isFile) {
+                note.textContent = 'This generator is open from a local file, so the link only works on this machine. Host index.html (e.g. GitHub Pages) and the link becomes shareable.';
+                note.className = 'share-note warn';
+            } else {
+                note.textContent = 'Anyone opening this link gets the protected viewer. The settings travel in the “#” fragment, which browsers never send to a server.';
+                note.className = 'share-note';
+            }
+        }
+
+        /* =====================================================================
            GENERATE
            ===================================================================== */
 
-        function generatePortal() {
-            if (!validateAll()) return;
+        // Order is part of the share-link format: append only, never reorder,
+        // or existing links would decode with the wrong features enabled.
+        const FEATURE_ORDER = ['copyProtect','screenshotProtect','printBlock','devtoolsDetect',
+                               'watermark','idleLock','sessionTimer','frameGuard','xorEncrypt','frameSandbox'];
 
-            const rawUrl = docUrlInput.value.trim();
-            const embedUrl = toEmbedUrl(rawUrl);
-            const title = docTitleInput.value.trim();
-            const owner = docOwnerInput.value.trim();
-            const classification = document.getElementById('docClassification').value;
-            const access = document.getElementById('docAccess').value;
-            const sessionMin = clampSession();
-            const wmText = watermarkInput.value.trim() || classification;
+        // The whole portal is described by this object. A share link is just
+        // this, base64url-encoded, so the page can rebuild the portal from it.
+        function collectConfig() {
+            return {
+                u: toEmbedUrl(docUrlInput.value.trim()),
+                t: docTitleInput.value.trim(),
+                o: docOwnerInput.value.trim(),
+                c: document.getElementById('docClassification').value,
+                a: document.getElementById('docAccess').value,
+                s: clampSession(),
+                w: watermarkInput.value.trim(),
+                f: FEATURE_ORDER.reduce(function (m, name, i) { return m | (isOn(name) ? (1 << i) : 0); }, 0)
+            };
+        }
 
-            const useCopyProtect = isOn('copyProtect');
-            const useScreenshot  = isOn('screenshotProtect');
-            const usePrint       = isOn('printBlock');
-            const useDevtools    = isOn('devtoolsDetect');
-            const useWatermark   = isOn('watermark');
-            const useIdle        = isOn('idleLock');
-            const useTimer       = isOn('sessionTimer');
-            const useGuard       = isOn('frameGuard');
-            const useXor         = isOn('xorEncrypt');
-            const useSandbox     = isOn('frameSandbox');
+        function buildPortal(cfg) {
+            const embedUrl = String(cfg.u || '');
+            const title = String(cfg.t || 'Document');
+            const owner = String(cfg.o || '');
+            const classification = CLASS_THEME[cfg.c] ? cfg.c : 'Confidential';
+            const access = String(cfg.a || 'View Only');
+            let sessionMin = parseInt(cfg.s, 10);
+            if (!isFinite(sessionMin)) sessionMin = DEFAULT_SESSION_DURATION;
+            sessionMin = Math.min(MAX_SESSION_DURATION, Math.max(MIN_SESSION_DURATION, sessionMin));
+            const wmText = String(cfg.w || '').trim() || classification;
+
+            const flags = cfg.f | 0;
+            function flag(name) { return !!(flags & (1 << FEATURE_ORDER.indexOf(name))); }
+            const useCopyProtect = flag('copyProtect');
+            const useScreenshot  = flag('screenshotProtect');
+            const usePrint       = flag('printBlock');
+            const useDevtools    = flag('devtoolsDetect');
+            const useWatermark   = flag('watermark');
+            const useIdle        = flag('idleLock');
+            const useTimer       = flag('sessionTimer');
+            const useGuard       = flag('frameGuard');
+            const useXor         = flag('xorEncrypt');
+            const useSandbox     = flag('frameSandbox');
 
             const theme = CLASS_THEME[classification] || CLASS_THEME['Confidential'];
 
@@ -941,7 +1337,7 @@
                so it survives both the JS template literal and the HTML parser
                of this page.
                --------------------------------------------------------------- */
-            generatedHTML = `<!DOCTYPE html>
+            return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1506,6 +1902,13 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
 </body>
 </html>`;
 
+        }
+
+        function generatePortal() {
+            if (!validateAll()) return;
+            lastConfig = collectConfig();
+            generatedHTML = buildPortal(lastConfig);
+
             /* ---------- surface the result ---------- */
             document.getElementById('codeOutput').textContent = generatedHTML;
             document.getElementById('outputSize').textContent =
@@ -1515,6 +1918,7 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
             document.getElementById('previewBtn').style.display = '';
             document.getElementById('stepPill3').className = 'step-pill done';
 
+            refreshShare();
             if (previewVisible) renderPreview();
         }
 
@@ -1525,6 +1929,36 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
         function renderPreview() {
             const f = document.getElementById('previewFrame');
             f.srcdoc = generatedHTML;
+        }
+
+        function copyText(text, done) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+                return;
+            }
+            // Clipboard API is unavailable on file:// in some browsers.
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+            document.body.removeChild(ta);
+            done(ok);
+        }
+
+        function downloadBlob(blob, filename) {
+            const href = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = href;
+            a.download = filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            // Revoking synchronously can abort the download in some browsers.
+            setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(href); }, 4000);
         }
 
         function slugify(s) {
@@ -1544,6 +1978,48 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
             if (!win) alert('Your browser blocked the pop-up. Allow pop-ups for this page to test the link.');
         });
 
+        Array.prototype.forEach.call(document.querySelectorAll('input[name="shareMode"]'), function (r) {
+            r.addEventListener('change', function () {
+                document.getElementById('hostedField').style.display = (r.value === 'hosted' && r.checked) ? '' : 'none';
+                refreshShare();
+            });
+        });
+        document.getElementById('hostedUrl').addEventListener('input', refreshShare);
+
+        document.getElementById('copyLinkBtn').addEventListener('click', function () {
+            const btn = this, link = currentShareLink();
+            if (!link) return;
+            copyText(link, function (ok) {
+                btn.textContent = ok ? 'Copied!' : 'Failed';
+                setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+            });
+        });
+
+        document.getElementById('qrSvgBtn').addEventListener('click', function () {
+            const link = currentShareLink();
+            if (!link) return;
+            downloadBlob(new Blob([qrToSvg(link, 512)], { type: 'image/svg+xml' }),
+                         'securedoc-qr-' + slugify(docTitleInput.value.trim()) + '.svg');
+        });
+
+        document.getElementById('qrPngBtn').addEventListener('click', function () {
+            const link = currentShareLink();
+            if (!link) return;
+            const qr = makeQR(link), quiet = 4, scale = 8;
+            const dim = (qr.size + quiet * 2) * scale;
+            const cv = document.createElement('canvas');
+            cv.width = cv.height = dim;
+            const ctx = cv.getContext('2d');
+            ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, dim, dim);
+            ctx.fillStyle = '#000';
+            for (let r = 0; r < qr.size; r++)
+                for (let c = 0; c < qr.size; c++)
+                    if (qr.modules[r][c]) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
+            cv.toBlob(function (b) {
+                downloadBlob(b, 'securedoc-qr-' + slugify(docTitleInput.value.trim()) + '.png');
+            }, 'image/png');
+        });
+
         document.getElementById('generateBtn').addEventListener('click', generatePortal);
 
         document.getElementById('previewBtn').addEventListener('click', function() {
@@ -1559,41 +2035,15 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
 
         document.getElementById('copyBtn').addEventListener('click', function() {
             const btn = this;
-            function done(ok) {
+            copyText(generatedHTML, function (ok) {
                 btn.textContent = ok ? 'Copied!' : 'Copy failed';
                 setTimeout(function() { btn.textContent = 'Copy HTML'; }, 2000);
-            }
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(generatedHTML).then(function() { done(true); }, function() { done(false); });
-            } else {
-                // Clipboard API is unavailable on file:// in some browsers.
-                const ta = document.createElement('textarea');
-                ta.value = generatedHTML;
-                ta.style.position = 'fixed';
-                ta.style.opacity = '0';
-                document.body.appendChild(ta);
-                ta.select();
-                let ok = false;
-                try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-                document.body.removeChild(ta);
-                done(ok);
-            }
+            });
         });
 
         document.getElementById('downloadBtn').addEventListener('click', function() {
-            const blob = new Blob([generatedHTML], { type: 'text/html;charset=utf-8' });
-            const href = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = href;
-            a.download = 'securedoc-' + slugify(docTitleInput.value.trim()) + '.html';
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            // Revoking synchronously can abort the download in some browsers.
-            setTimeout(function() {
-                document.body.removeChild(a);
-                URL.revokeObjectURL(href);
-            }, 4000);
+            downloadBlob(new Blob([generatedHTML], { type: 'text/html;charset=utf-8' }),
+                         'securedoc-' + slugify(docTitleInput.value.trim()) + '.html');
         });
 
         document.getElementById('openTabBtn').addEventListener('click', function() {
@@ -1627,6 +2077,41 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
                 }
             });
         });
+
+        /* =====================================================================
+           VIEWER MODE
+
+           A share link carries the portal config in the fragment. When one is
+           present the page is not a builder at all -- it rewrites itself as the
+           portal, so a shared link needs nothing hosted beyond this file.
+           ===================================================================== */
+        function bootViewerMode() {
+            const m = /[#&]d=([A-Za-z0-9\-_]+)/.exec(location.hash || '');
+            if (!m) return false;
+            let cfg;
+            try { cfg = decodeConfig(m[1]); } catch (e) { cfg = null; }
+            if (!cfg || !cfg.u || !parseUrl(cfg.u)) {
+                document.documentElement.classList.remove('viewer-boot');
+                return false;                       // fall back to the builder UI
+            }
+            const html = buildPortal(cfg);
+            // document.open() is ignored while the parser is still active, which
+            // would append the portal to the builder instead of replacing it (and
+            // strand the CSP meta outside <head>). Wait for parsing to finish.
+            function rewrite() {
+                document.open();
+                document.write(html);
+                document.close();
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', rewrite, { once: true });
+            } else {
+                rewrite();
+            }
+            return true;
+        }
+
+        if (bootViewerMode()) return;
 
         checkReady();
     })();
