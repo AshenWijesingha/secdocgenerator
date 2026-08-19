@@ -23,9 +23,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -46,7 +46,16 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
         run: npm run build
 
+      # NOTE: Pages must already be enabled on the repository, with
+      # Settings > Pages > Source set to "GitHub Actions". That is a one-time
+      # manual step and cannot be automated from here: creating a Pages site
+      # needs repository-admin rights, and GITHUB_TOKEN does not have them
+      # even with `pages: write` — `enablement: true` fails with
+      # "Create Pages site failed. Error: Resource not accessible by
+      # integration". Until it is enabled this step fails with
+      # "Get Pages site failed ... Not Found".
       - uses: actions/configure-pages@v5
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./out
