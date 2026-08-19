@@ -1226,9 +1226,12 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
 
     var loadStart = Date.now();
     var settled = false;
+    var progressStopped = false;      // kept separate from settled: the failed
+                                      // path stays unsettled so Retry can re-run,
+                                      // but the rAF loop must still stop.
 
     function tickProgress() {
-        if (settled) return;
+        if (progressStopped) return;
         var t = (Date.now() - loadStart) / 1000;
         // Asymptotic approach to 92% so the bar always reflects real elapsed time.
         var pct = 92 * (1 - Math.exp(-t / 1.15));
@@ -1239,6 +1242,7 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
 
     var watchdog = setTimeout(function(){
         if (settled) return;
+        progressStopped = true;
         loader.classList.add('stalled');
         loaderText.textContent = 'Still waiting for the document…';
     }, WATCHDOG_MS);
@@ -1281,6 +1285,7 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
     function settle(state) {
         if (settled) return;
         clearTimeout(watchdog);
+        progressStopped = true;
         if (state === 'failed') {
             loaderBar.style.width = '100%';
             loader.classList.add('stalled');
@@ -1313,9 +1318,11 @@ ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg 
             loaderText.textContent = 'Retrying…';
             loadStart = Date.now();
             settled = false;
+            progressStopped = false;
             requestAnimationFrame(tickProgress);
             watchdog = setTimeout(function(){
                 if (settled) return;
+                progressStopped = true;
                 loader.classList.add('stalled');
                 loaderText.textContent = 'Still waiting for the document…';
             }, WATCHDOG_MS);
