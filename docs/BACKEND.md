@@ -63,8 +63,20 @@ npx supabase functions deploy resolve-portal --no-verify-jwt
 npx supabase secrets set VIEW_LOG_IP_SALT="$(openssl rand -hex 32)"
 ```
 
-Then add two **repository variables** (Settings → Secrets and variables →
-Actions → Variables) so the Pages build can reach Supabase:
+### Getting the keys into the build
+
+`next build` reads `.env`, `.env.local` and `.env.production` — **not**
+`.env.example`, which is documentation only. Putting values in `.env.example`
+is a silent no-op: the build succeeds and the app still reports that no
+backend is configured.
+
+This repo commits the public values in **`.env.production`**. That is safe
+because the publishable key grants only what Row Level Security allows, and
+every table in the project has RLS enabled.
+
+To point a fork at a different project without editing the file, set these as
+**repository variables** (Settings → Secrets and variables → Actions →
+Variables) — the workflow passes them as env vars, which override the file:
 
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
