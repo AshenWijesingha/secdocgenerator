@@ -43,6 +43,8 @@ export default function BuilderPage() {
   const [expiresDays, setExpiresDays] = useState('');
   const [maxViews, setMaxViews] = useState('');
   const [passcode, setPasscode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [genErr, setGenErr] = useState('');
 
   const backend = isBackendConfigured();
 
@@ -54,15 +56,27 @@ export default function BuilderPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  const generate = useCallback(() => {
-    if (!b.ready) return;
-    const c = b.config();
-    setCfg(c);
-    setHtml(buildPortal(c));
-    setShortId('');
-    setSaveMsg(null);
-    setMode(backend && signedIn ? 'short' : 'fragment');
-  }, [b, backend, signedIn]);
+  const generate = useCallback(async () => {
+    if (!b.ready || busy) return;
+    setBusy(true);
+    setGenErr('');
+    try {
+      // With a password set this is where the key derivation happens, which
+      // is deliberately slow — hence the busy state rather than a sync call.
+      const c = await b.buildConfig();
+      setCfg(c);
+      setHtml(buildPortal(c));
+      setShortId('');
+      setSaveMsg(null);
+      setMode(backend && signedIn ? 'short' : 'fragment');
+    } catch (err) {
+      setCfg(null);
+      setHtml('');
+      setGenErr(err instanceof Error ? err.message : 'Could not build the portal.');
+    } finally {
+      setBusy(false);
+    }
+  }, [b, backend, signedIn, busy]);
 
   const link = useMemo(() => {
     if (!cfg) return '';
@@ -211,13 +225,48 @@ export default function BuilderPage() {
                 <input id="wm" type="text" value={b.watermark} maxLength={120}
                   onChange={(e) => b.setWatermark(e.target.value)} />
                 {b.errors.watermark && <div className="err">{b.errors.watermark}</div>}
-                <div className="hint">Tiled diagonally. Blank falls back to the classification label.</div>
+                <div className="hint">
+                  Tiled diagonally and stamped with the session id and start time.
+                  Blank falls back to the classification label.
+                </div>
+              </div>
+            </div>
+
+            {/* ---------------- password ---------------- */}
+            <div className="section">
+              <div className="section-label"><div className="num">3</div> Document Password</div>
+              <div className="row-2">
+                <div className="field">
+                  <label htmlFor="pw">Password <span className="hint" style={{ display: 'inline' }}>(optional)</span></label>
+                  <input id="pw" type="password" value={b.password} autoComplete="new-password"
+                    placeholder="Leave blank for no password"
+                    onChange={(e) => b.setPassword(e.target.value)} />
+                  {b.errors.password && <div className="err">{b.errors.password}</div>}
+                </div>
+                <div className="field">
+                  <label htmlFor="pw2">Confirm password</label>
+                  <input id="pw2" type="password" value={b.password2} autoComplete="new-password"
+                    disabled={!b.password} onChange={(e) => b.setPassword2(e.target.value)} />
+                  {b.errors.password2 && <div className="err">{b.errors.password2}</div>}
+                </div>
+              </div>
+              <div className="notice notice-info">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+                </svg>
+                <div>
+                  The password is the decryption key, not a check the page performs. The document
+                  URL is encrypted with AES-256-GCM under a key derived from it, and the plaintext
+                  is left out of the link, the QR code, the downloaded file and the database — so
+                  there is nothing to read without it, and <b>nothing to recover it from if you
+                  lose it</b>. Send it to viewers over a different channel than the link.
+                </div>
               </div>
             </div>
 
             {/* ---------------- features ---------------- */}
             <div className="section">
-              <div className="section-label"><div className="num">3</div> Security Features</div>
+              <div className="section-label"><div className="num">4</div> Security Features</div>
               {FEATURES.map((f) => (
                 <div className="toggle-row" key={f.name}>
                   <div className="toggle-label">{f.label}<span>{f.blurb}</span></div>
@@ -229,8 +278,8 @@ export default function BuilderPage() {
             </div>
 
             <div className="actions">
-              <button className="btn btn-primary" disabled={!b.ready} onClick={generate}>
-                Generate Secure Portal
+              <button className="btn btn-primary" disabled={!b.ready || busy} onClick={() => void generate()}>
+                {busy ? 'Encrypting…' : 'Generate Secure Portal'}
               </button>
               {html && (
                 <button className="btn btn-secondary"
@@ -240,6 +289,8 @@ export default function BuilderPage() {
                 </button>
               )}
             </div>
+
+            {genErr && <div className="notice notice-err"><span>{genErr}</span></div>}
 
             {/* ---------------- share ---------------- */}
             {cfg && (
@@ -377,9 +428,10 @@ function BackendPanel(p: {
             onChange={(e) => p.setMaxViews(e.target.value)} />
         </div>
         <div className="field">
-          <label htmlFor="pc">Passcode</label>
+          <label htmlFor="pc">Link passcode</label>
           <input id="pc" type="password" value={p.passcode} placeholder="none" autoComplete="new-password"
             onChange={(e) => p.setPasscode(e.target.value)} />
+          <div className="hint">Checked on the server before the link resolves — separate from the document password.</div>
         </div>
       </div>
       <button className="btn btn-primary" disabled={p.saving} onClick={p.saveToBackend}>

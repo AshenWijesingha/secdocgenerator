@@ -7,6 +7,7 @@
  */
 import type { PortalConfig } from './types';
 import { parseUrl } from './embed';
+import { isLockPayload } from './lock';
 
 export function encodeConfig(cfg: PortalConfig): string {
   const bytes = new TextEncoder().encode(JSON.stringify(cfg));
@@ -23,7 +24,11 @@ export function decodeConfig(str: string): PortalConfig | null {
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const cfg = JSON.parse(new TextDecoder().decode(bytes)) as PortalConfig;
-    if (!cfg || typeof cfg.u !== 'string' || !parseUrl(cfg.u)) return null;
+    if (!cfg || typeof cfg.u !== 'string') return null;
+    // A locked portal carries no plaintext URL at all — the encrypted payload
+    // is what has to be well-formed instead.
+    if (cfg.p) return isLockPayload(cfg.p) ? cfg : null;
+    if (!parseUrl(cfg.u)) return null;
     return cfg;
   } catch {
     return null;

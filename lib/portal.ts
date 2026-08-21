@@ -11,6 +11,7 @@
 import type { PortalConfig } from './types';
 import type { FeatureName } from './types';
 import { CLASS_THEME, FEATURE_ORDER, MIN_SESSION_DURATION, MAX_SESSION_DURATION, DEFAULT_SESSION_DURATION, LOAD_WATCHDOG_MS } from './types';
+import { isLockPayload } from './lock';
 
 const HTML_ESCAPE_MAP: Record<string, string> = {
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -56,6 +57,26 @@ function watermarkDataUri(text: string): string {
     return 'data:image/svg+xml,' + encodeURIComponent(svg);
 }
 
+/**
+ * Stable identifier for one portal, used as the localStorage key that holds
+ * the session deadline. It is an identifier, not a secret: it only has to be
+ * the same on every reload of the same portal and different between portals,
+ * so a doubled FNV-1a is plenty and costs nothing at build time.
+ *
+ * The seed uses the ciphertext for a locked portal, so the key never derives
+ * from a URL the page is not otherwise allowed to know.
+ */
+function portalKey(seed: string): string {
+    let h1 = 0x811c9dc5;
+    let h2 = 0x01000193;
+    for (let i = 0; i < seed.length; i++) {
+        const c = seed.charCodeAt(i);
+        h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+        h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+    }
+    return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+}
+
 function xorEncode(str: string): { key: number[]; enc: number[] } {
     const key: number[] = [];
     const rnd = (window.crypto && window.crypto.getRandomValues)
@@ -78,6 +99,9 @@ export function buildPortal(cfg: PortalConfig): string {
     sessionMin = Math.min(MAX_SESSION_DURATION, Math.max(MIN_SESSION_DURATION, sessionMin));
     const wmText = String(cfg.w || '').trim() || classification;
 
+    const lock = isLockPayload(cfg.p) ? cfg.p : null;
+    const useLock = !!lock;
+
     const flags = cfg.f | 0;
     const flag = (name: FeatureName) => !!(flags & (1 << FEATURE_ORDER.indexOf(name)));
     const useCopyProtect = flag('copyProtect');
@@ -88,14 +112,21 @@ export function buildPortal(cfg: PortalConfig): string {
     const useIdle        = flag('idleLock');
     const useTimer       = flag('sessionTimer');
     const useGuard       = flag('frameGuard');
-    const useXor         = flag('xorEncrypt');
+    // XOR is cosmetic obfuscation; under a password the URL is already
+    // AES-encrypted and absent from the file, so layering XOR on top would
+    // only be a second name for the same thing.
+    const useXor         = flag('xorEncrypt') && !useLock;
     const useSandbox     = flag('frameSandbox');
 
     const theme = CLASS_THEME[classification] || CLASS_THEME['Confidential'];
 
     // Origin of the embedded document, used for preconnect + CSP frame-src.
-    let docOrigin: string = '';
-    try { docOrigin = new URL(embedUrl).origin; } catch (e) { docOrigin = ''; }
+    // A locked portal carries its origin in the clear inside the payload so
+    // the connection is already warm by the time the password is accepted.
+    let docOrigin: string = lock ? String(lock.o || '') : '';
+    if (!docOrigin) {
+        try { docOrigin = new URL(embedUrl).origin; } catch (e) { docOrigin = ''; }
+    }
     const isGoogleOrigin = /^https:\/\/([\w-]+\.)*google\.com$/.test(docOrigin);
 
     // frame-src stays permissive over https: a viewer such as Google's
@@ -105,7 +136,11 @@ export function buildPortal(cfg: PortalConfig): string {
     // getDocUrl() is defined in the boot script so the iframe request
     // starts while the rest of the document is still parsing.
     let urlSnippet: string;
-    if (useXor) {
+    if (useLock) {
+        // Nothing to hand out yet: the URL does not exist in this file until
+        // the password has decrypted it into window.__sdUrl.
+        urlSnippet = 'window.getDocUrl=function(){return window.__sdUrl||"";};';
+    } else if (useXor) {
         const pack = xorEncode(embedUrl);
         urlSnippet =
             'var _k=[' + pack.key.join(',') + '],_e=[' + pack.enc.join(',') + '];' +
@@ -114,15 +149,86 @@ export function buildPortal(cfg: PortalConfig): string {
         urlSnippet = 'var _u=' + jsStr(embedUrl) + ';window.getDocUrl=function(){return _u;};';
     }
 
+    /*
+     * Session identity.
+     *
+     * The deadline is written to localStorage under a key derived from the
+     * portal, so reloading resumes the same countdown instead of minting a
+     * fresh one — the whole point of a time-limited link. The same record
+     * carries a short session id, which the watermark stamps onto the page so
+     * a screenshot can be traced back to a viewing session.
+     */
+    const sessionKey = 'sd.s.' + portalKey(
+        (lock ? lock.c : embedUrl) + '|' + title + '|' + owner + '|' + sessionMin,
+    );
+
+    // src is set from script whenever something has to be decided first —
+    // whether the session is already spent, or whether the password is right.
+    // The parser-assigned attribute is kept for the plain case, where it is
+    // the earliest possible moment to start the request.
+    const srcFromScript = useLock || useXor || useTimer;
+
+    /*
+     * Emitted first in the boot script, before anything can load. Resolves the
+     * session record so that a reload resumes the existing countdown instead
+     * of starting a new one, and produces the short session id the watermark
+     * stamps onto every screenshot.
+     *
+     * When the timer feature is off the deadline is still computed and stored;
+     * nothing reads it, but the same record is what keeps the session id
+     * stable across reloads, so there is only one code path.
+     */
+    const sessionBoot = `
+        /* Every name here is prefixed: this runs in the same closure as the
+           URL snippet above, and a collision would silently rewrite the
+           document link. */
+        var _sdKey=${jsStr(sessionKey)},_sdTtl=${sessionMin}*60*1000,_sdStore=null;
+        try{var _sdProbe="__sdt";localStorage.setItem(_sdProbe,"1");localStorage.removeItem(_sdProbe);_sdStore=localStorage;}catch(e){_sdStore=null;}
+        function _sdNewSid(){var a="ABCDEFGHJKLMNPQRSTUVWXYZ23456789",o="",r=null;try{r=crypto.getRandomValues(new Uint8Array(6));}catch(e){r=null;}for(var i=0;i<6;i++){o+=a.charAt((r?r[i]:Math.floor(Math.random()*256))%a.length);}return o;}
+        var _sdNow=Date.now(),_sdRec=null;
+        if(_sdStore){try{_sdRec=JSON.parse(_sdStore.getItem(_sdKey)||"null");}catch(e){_sdRec=null;}}
+        var _sdDeadline,_sdSid;
+        if(_sdRec&&typeof _sdRec.d==="number"&&_sdRec.n===_sdTtl&&typeof _sdRec.sid==="string"){
+            /* Cap at one full session: a device clock wound backwards can
+               shorten nothing and must not be able to lengthen anything. */
+            _sdDeadline=Math.min(_sdRec.d,_sdNow+_sdTtl);_sdSid=_sdRec.sid;
+        }else{
+            _sdDeadline=_sdNow+_sdTtl;_sdSid=_sdNewSid();
+        }
+        if(_sdStore){try{
+            _sdStore.setItem(_sdKey,JSON.stringify({d:_sdDeadline,n:_sdTtl,sid:_sdSid}));
+            /* Forget sessions that ended over a month ago so a browser that
+               opens many portals does not accumulate records forever. */
+            for(var _sdI=_sdStore.length-1;_sdI>=0;_sdI--){
+                var _sdOld=_sdStore.key(_sdI);
+                if(!_sdOld||_sdOld.indexOf("sd.s.")!==0||_sdOld===_sdKey)continue;
+                try{var _sdR=JSON.parse(_sdStore.getItem(_sdOld)||"null");
+                    if(!_sdR||typeof _sdR.d!=="number"||_sdR.d<_sdNow-2592000000)_sdStore.removeItem(_sdOld);
+                }catch(e){_sdStore.removeItem(_sdOld);}
+            }
+        }catch(e){}}
+        window.__sdSession={key:_sdKey,deadline:_sdDeadline,sid:_sdSid,startedAt:_sdDeadline-_sdTtl,expired:${useTimer ? '_sdDeadline<=_sdNow' : 'false'},persisted:!!_sdStore};`;
+
+    // What actually kicks the document request off, once the boot script has
+    // established there is a session left to spend it on.
+    const startSnippet = useLock ? ''
+        : useTimer ? 'if(!window.__sdSession.expired){f.src=window.getDocUrl();}'
+        : useXor ? 'f.src=window.getDocUrl();'
+        : '';
+
     const secTags: string[] = [];
     function tag(label: string, pathD: string) {
         secTags.push('<div class="sec-tag"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="' + pathD + '"/></svg>' + escH(label) + '</div>');
     }
     if (useCopyProtect) tag('Copy Disabled', 'M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z');
-    if (useScreenshot)  tag('Screenshot Protected', 'M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88');
+    // Named for what it actually does. A web page cannot stop an operating
+    // system screenshot — least of all on a phone — and calling this
+    // "Screenshot Protected" told viewers something untrue.
+    if (useScreenshot)  tag('Hidden When Inactive', 'M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88');
     if (usePrint)       tag('Print Blocked', 'M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0 1 10.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0 .229 2.523a1.125 1.125 0 0 1-1.12 1.227H7.231c-.662 0-1.18-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0 0 21 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 0 0-1.913-.247M6.34 18H5.25A2.25 2.25 0 0 1 3 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 0 1 1.913-.247m10.5 0a48.536 48.536 0 0 0-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18.75 12H5.25');
     if (useWatermark)   tag('Watermarked', 'M9 17.25v1.007a3 3 0 0 1-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0 1 15 18.257V17.25m6-12V15a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 15V5.25m18 0A2.25 2.25 0 0 0 18.75 3H5.25A2.25 2.25 0 0 0 3 5.25m18 0V12a2.25 2.25 0 0 1-2.25 2.25H5.25A2.25 2.25 0 0 1 3 12V5.25');
     if (useIdle)        tag('Auto-Lock', 'M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z');
+    if (useLock)        tag('Password Required', 'M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z');
 
     const wmUri = useWatermark ? watermarkDataUri(wmText) : '';
 
@@ -243,11 +349,21 @@ body:not(.doc-ready) .bg-mesh::before,body:not(.doc-ready) .bg-mesh::after{anima
 #expiredBlock{z-index:9998;background:#0a0e17}
 #expiredBlock .icon{background:rgba(148,163,184,0.08);border:1px solid rgba(148,163,184,0.18)}
 #expiredBlock .icon svg{color:#94a3b8}
+#lockGate{z-index:9994;background:#0a0e17}
+#lockGate .icon{background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.2)}
+#lockGate .icon svg{color:#3b82f6}
+.lock-form{display:flex;gap:8px;margin-top:22px;width:100%;max-width:360px}
+.lock-form input{flex:1;min-width:0;padding:11px 14px;border-radius:8px;background:rgba(17,24,39,0.9);border:1px solid rgba(59,130,246,0.22);color:var(--text-primary);font-family:inherit;font-size:0.9rem}
+.lock-form input:focus{outline:none;border-color:var(--accent)}
+.lock-form button{margin-top:0;padding:11px 22px;white-space:nowrap}
+.lock-form button[disabled]{opacity:.55;cursor:progress}
+.lock-msg{margin-top:12px;font-size:0.78rem;min-height:1.2em;color:#fca5a5;max-width:360px}
+.lock-msg.info{color:var(--text-muted)}
 #frameBlock{z-index:9999;background:#0a0e17}
 #frameBlock .icon{background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.2)}
 #frameBlock .icon svg{color:#ef4444}
 ${usePrint ? `@media print{html,body{background:#fff!important}body>*{display:none!important}body::after{content:'This document is protected. Printing has been disabled.';display:flex;align-items:center;justify-content:center;height:100vh;font-size:20px;color:#111;font-family:Helvetica,Arial,sans-serif;text-align:center;padding:2rem}}` : ''}
-@media(max-width:768px){.app-header{padding:0 1rem}.info-bar{padding:12px 1rem}.doc-toolbar{padding:8px 1rem;flex-wrap:wrap}.viewer-wrapper{padding:1rem}.logo-text{font-size:1rem}.security-tags{display:none}.viewer-frame{min-height:70vh}}
+@media(max-width:768px){.app-header{padding:0 1rem}.info-bar{padding:12px 1rem}.doc-toolbar{padding:8px 1rem;flex-wrap:wrap}.viewer-wrapper{padding:1rem}.logo-text{font-size:1rem}.security-tags{display:none}.viewer-frame{min-height:70vh}.watermark-layer{opacity:0.17}.lock-form{flex-direction:column}.lock-form button{width:100%}}
 .fade-in{animation:fadeIn .5s ease-out forwards}.fade-in-delay{animation:fadeIn .5s ease-out .12s forwards;opacity:0}.fade-in-delay2{animation:fadeIn .5s ease-out .22s forwards;opacity:0}
 @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}.fade-in-delay,.fade-in-delay2{opacity:1}}
@@ -295,7 +411,7 @@ ${usePrint ? `@media print{html,body{background:#fff!important}body>*{display:no
 
     <div class="viewer-wrapper fade-in-delay2">
 <div class="viewer-frame" id="viewerFrame">
-    <iframe id="docFrame" class="doc-frame" title="${escH(title)}"${useXor ? '' : ` src="${escH(embedUrl)}"`}
+    <iframe id="docFrame" class="doc-frame" title="${escH(title)}"${srcFromScript ? '' : ` src="${escH(embedUrl)}"`}
             loading="eager" fetchpriority="high"
             allow="fullscreen" allowfullscreen${useSandbox ? `
             sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-modals allow-presentation"` : ''}></iframe>
@@ -311,7 +427,8 @@ ${usePrint ? `@media print{html,body{background:#fff!important}body>*{display:no
            is what tells us rendering has actually gone quiet. */
         f.addEventListener('load',function(){s.loads++;s.lastLoadAt=Date.now();fire('loaded')});
         f.addEventListener('error',function(){fire('failed')});
-        ${useXor ? 'f.src=window.getDocUrl();' : ''}
+        ${sessionBoot}
+        ${startSnippet}
     })();
     <\/script>
     ${useWatermark ? `<div class="watermark-layer" id="watermarkLayer" style="background-image:url(&quot;${wmUri}&quot;)"></div>` : ''}
@@ -341,6 +458,7 @@ ${useScreenshot ? `<div class="curtain" id="screenshotBlock"><div class="icon"><
 ${useIdle ? `<div class="curtain" id="idleLock"><div class="icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/></svg></div><h2>Session Locked</h2><p>Your session was locked after a period of inactivity.</p><button type="button" id="resumeBtn">Resume Viewing</button></div>` : ''}
 ${useDevtools ? `<div class="curtain" id="devtoolsBlock"><div class="icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.982 18.725A7.488 7.488 0 0 0 12 15.75a7.488 7.488 0 0 0-5.982 2.975m11.963 0a9 9 0 1 0-11.963 0m11.963 0A8.966 8.966 0 0 1 12 21a8.966 8.966 0 0 1-5.982-2.275M15 9.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg></div><h2>Access Suspended</h2><p>Developer tools appear to be open. The document is hidden until they are closed.</p></div>` : ''}
 <div class="curtain" id="expiredBlock"><div class="icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg></div><h2>Session Expired</h2><p>Your viewing session has ended. Please request a new access link from the document owner.</p></div>
+${useLock ? `<div class="curtain active" id="lockGate"><div class="icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/></svg></div><h2>Password Required</h2><p>This document is encrypted. Enter the password you were given &mdash; it is the key, so there is nothing to read here without it.</p><form class="lock-form" id="lockForm" autocomplete="off"><input id="lockInput" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Password" aria-label="Document password"><button type="submit" id="lockBtn">Unlock</button></form><div class="lock-msg" id="lockMsg" role="status" aria-live="polite"></div></div>` : ''}
 <div class="curtain" id="frameBlock"><div class="icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/></svg></div><h2>Embedding Blocked</h2><p>This portal must be opened directly, not inside another page.</p></div>
 
 <script>
@@ -429,14 +547,24 @@ var pct = 92 * (1 - Math.exp(-t / 1.15));
 loaderBar.style.width = pct.toFixed(1) + '%';
 requestAnimationFrame(tickProgress);
     }
-    requestAnimationFrame(tickProgress);
-
-    var watchdog = setTimeout(function(){
-if (settled) return;
-progressStopped = true;
-loader.classList.add('stalled');
-loaderText.textContent = 'Still waiting for the document…';
-    }, WATCHDOG_MS);
+    var watchdog = null;
+    /* Restarts the progress bar and the stall watchdog from now. Called at
+       boot, on Retry, and after a password is accepted — in the last case the
+       clock must not have been running while the viewer was typing. */
+    function armLoad() {
+clearTimeout(watchdog);
+loadStart = Date.now();
+settled = false;
+progressStopped = false;
+requestAnimationFrame(tickProgress);
+watchdog = setTimeout(function(){
+    if (settled) return;
+    progressStopped = true;
+    loader.classList.add('stalled');
+    loaderText.textContent = 'Still waiting for the document…';
+}, WATCHDOG_MS);
+    }
+    ${useLock ? '' : `if (!window.__sdSession.expired) armLoad();`}
 
     var renderBar = document.getElementById('renderBar');
     var RENDER_QUIET_MS = 2500;
@@ -497,7 +625,9 @@ showToast('Document loaded securely', 'success', 2200);
     var openDirectBtn = document.getElementById('openDirectBtn');
     if (openDirectBtn) {
 openDirectBtn.addEventListener('click', function(){
-    try { window.open(window.getDocUrl(), '_blank', 'noopener'); }
+    var u = window.getDocUrl();
+    if (!u) { showToast('Unlock the document first', 'warn'); return; }
+    try { window.open(u, '_blank', 'noopener'); }
     catch (e) { showToast('Could not open the document', 'warn'); }
 });
     }
@@ -505,22 +635,107 @@ openDirectBtn.addEventListener('click', function(){
     var retryBtn = document.getElementById('retryBtn');
     if (retryBtn) {
 retryBtn.addEventListener('click', function(){
+    if (!window.getDocUrl()) { showToast('Unlock the document first', 'warn'); return; }
     loader.classList.remove('stalled');
     loaderText.textContent = 'Retrying…';
-    loadStart = Date.now();
-    settled = false;
-    progressStopped = false;
-    requestAnimationFrame(tickProgress);
-    watchdog = setTimeout(function(){
-        if (settled) return;
-        progressStopped = true;
-        loader.classList.add('stalled');
-        loaderText.textContent = 'Still waiting for the document…';
-    }, WATCHDOG_MS);
+    armLoad();
     frame.addEventListener('load', function once(){ frame.removeEventListener('load', once); settle('loaded'); });
     try { frame.src = window.getDocUrl(); } catch (e) { settle('failed'); }
 });
     }
+
+    /* ---------- password gate ---------- */
+    ${lock ? `
+    (function(){
+var L_S = ${jsStr(lock.s)}, L_I = ${jsStr(lock.i)}, L_C = ${jsStr(lock.c)}, L_N = ${lock.n | 0};
+var form = document.getElementById('lockForm');
+var input = document.getElementById('lockInput');
+var btn = document.getElementById('lockBtn');
+var msg = document.getElementById('lockMsg');
+var fails = 0, busy = false;
+
+function say(text, kind) {
+    msg.textContent = text;
+    msg.className = 'lock-msg' + (kind === 'info' ? ' info' : '');
+}
+
+if (!(window.crypto && window.crypto.subtle)) {
+    // SubtleCrypto is only exposed in a secure context, so this is what an
+    // http:// or file:// copy of the portal looks like. There is no fallback
+    // worth offering: a weaker cipher here would defeat the point.
+    form.style.display = 'none';
+    say('This browser will not decrypt the document because the page was not loaded over a secure connection. Open the link over https:// and try again.');
+    return;
+}
+
+function ub64(str) {
+    var b = String(str).replace(/-/g, '+').replace(/_/g, '/');
+    while (b.length % 4) b += '=';
+    var bin = atob(b), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+}
+
+/* The password is the decryption key, not something compared against a
+   stored answer. A wrong one fails at the AES-GCM authentication tag, so
+   there is no check in this script that could be patched out and no URL in
+   this file to find without it. */
+function decryptUrl(pw) {
+    var enc = new TextEncoder();
+    return crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey'])
+        .then(function(m){
+            return crypto.subtle.deriveKey(
+                { name: 'PBKDF2', salt: ub64(L_S), iterations: L_N, hash: 'SHA-256' },
+                m, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+        })
+        .then(function(k){
+            return crypto.subtle.decrypt({ name: 'AES-GCM', iv: ub64(L_I) }, k, ub64(L_C));
+        })
+        .then(function(buf){ return new TextDecoder().decode(buf); });
+}
+
+function openDoc(url) {
+    window.__sdUrl = url;
+    curtain('lockGate', false);
+    // The load clock starts now, not when the page opened, so a viewer who
+    // took a while to type is not told the document is stalling.
+    armLoad();
+    try { frame.src = url; } catch (e) { settle('failed'); }
+}
+
+form.addEventListener('submit', function(e){
+    e.preventDefault();
+    if (busy) return;
+    var pw = input.value;
+    if (!pw) { say('Enter the password.'); return; }
+    busy = true;
+    btn.disabled = true;
+    say('Unlocking…', 'info');
+    // Key derivation is deliberately slow; yield a frame first so the
+    // message is on screen before the main thread goes quiet.
+    requestAnimationFrame(function(){
+        decryptUrl(pw).then(function(url){
+            var head = String(url).slice(0, 8).toLowerCase();
+            if (head.indexOf('https://') !== 0 && head.indexOf('http://') !== 0) {
+                throw new Error('not a url');
+            }
+            say('');
+            openDoc(url);
+        }).catch(function(){
+            fails++;
+            busy = false;
+            input.value = '';
+            say('That password is not correct.');
+            // Slows down guessing at the keyboard. It cannot slow down an
+            // offline attack on the ciphertext — the iteration count is what
+            // does that — so a strong password still matters.
+            setTimeout(function(){ btn.disabled = false; try { input.focus(); } catch (e) {} },
+                       Math.min(8000, 500 * Math.pow(2, fails - 1)));
+        });
+    });
+});
+setTimeout(function(){ try { input.focus(); } catch (e) {} }, 60);
+    })();` : ''}
 
     /* ---------- zoom ----------
        The iframe viewport is widened/narrowed and then scaled back, so the
@@ -565,8 +780,13 @@ window.addEventListener(evt, markActive, { passive: true, capture: true });
     ${useTimer ? `
     var timerEl = document.getElementById('timerText');
     var timerWrap = document.getElementById('sessionTimer');
-    // Deadline-based so a throttled/backgrounded tab still expires on time.
-    var deadline = Date.now() + SESSION_SECONDS * 1000;
+    // Deadline-based so a throttled/backgrounded tab still expires on time,
+    // and resolved in the boot script from storage so a reload continues the
+    // same countdown rather than handing out a fresh one.
+    var deadline = window.__sdSession.deadline;
+    if (!window.__sdSession.persisted) {
+timerWrap.title = 'Time remaining. This browser is blocking site storage, so the countdown restarts if the page is reloaded.';
+    }
     function expire() {
 if (expired) return;
 expired = true;
@@ -629,6 +849,67 @@ window.addEventListener('blur', function(){
 window.addEventListener('focus', reveal);
     }` : ''}
 
+    /* ---------- watermark ----------
+       A web page cannot stop an operating-system screenshot, on a phone least
+       of all. What it can do is make sure every capture carries the session
+       stamp, so a leaked image says which viewing session produced it. */
+    ${useWatermark ? `
+    (function(){
+var layer = document.getElementById('watermarkLayer');
+if (!layer) return;
+var WM = ${jsStr(wmText)};
+var stamp = window.__sdSession.sid + ' \u00b7 ' + new Date(window.__sdSession.startedAt)
+    .toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+function esc(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function tile(w, h, fs) {
+    function pair(x, y) {
+        var y2 = y + fs + 3;
+        return '<text x="' + x + '" y="' + y + '" font-size="' + fs + '" font-weight="700" transform="rotate(-30 ' + x + ' ' + y + ')">' + esc(WM) + '</text>'
+             + '<text x="' + x + '" y="' + y2 + '" font-size="' + Math.round(fs * 0.74) + '" font-weight="500" transform="rotate(-30 ' + x + ' ' + y2 + ')">' + esc(stamp) + '</text>';
+    }
+    return 'data:image/svg+xml,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">'
+        + '<g fill="#0f172a" font-family="Helvetica,Arial,sans-serif" letter-spacing="1.5">'
+        + pair(8, Math.round(h * 0.30)) + pair(Math.round(w * 0.5), Math.round(h * 0.78))
+        + '</g></svg>');
+}
+function paint() {
+    // Phone screens get a smaller tile: the same physical area then carries
+    // several stamps, so a cropped screenshot still contains one.
+    var small = window.innerWidth <= 768;
+    var w = small ? 250 : 360, h = small ? 150 : 210, fs = small ? 12 : 15;
+    layer.style.backgroundImage = 'url("' + tile(w, h, fs) + '")';
+    layer.style.backgroundSize = w + 'px ' + h + 'px';
+}
+paint();
+window.addEventListener('resize', paint, { passive: true });
+window.addEventListener('orientationchange', paint, { passive: true });
+
+/* A watermark that a single inspector click removes is not evidence of
+   anything, so the layer is restored whenever it is detached or styled
+   away. This does not defeat a determined viewer — nothing running in
+   their browser can — it defeats the trivial version and keeps the stamp
+   present in an ordinary capture. */
+function ensure() {
+    if (layer.parentNode !== viewer) viewer.appendChild(layer);
+    var st = layer.style;
+    if (st.display === 'none') st.removeProperty('display');
+    if (st.visibility === 'hidden') st.removeProperty('visibility');
+    if (st.opacity === '0') st.removeProperty('opacity');
+    if (!st.backgroundImage) paint();
+}
+try {
+    new MutationObserver(ensure).observe(viewer, {
+        childList: true, attributes: true, subtree: true, attributeFilter: ['style', 'class'],
+    });
+} catch (e) {}
+setInterval(ensure, 2000);
+    })();` : ''}
+
     /* ---------- copy / selection protection ---------- */
     ${useCopyProtect ? `
     ['copy','cut','paste'].forEach(function(evt){
@@ -689,7 +970,8 @@ window.addEventListener('resize', checkDevtools);
     }` : ''}
 
     /* ---------- footer state ---------- */
-    document.getElementById('sessionStart').textContent = new Date().toLocaleTimeString();
+    document.getElementById('sessionStart').textContent =
+new Date(window.__sdSession.startedAt).toLocaleTimeString();
     document.getElementById('year').textContent = new Date().getFullYear();
     ${useTimer ? `setTimeout(function(){ showToast('Secure session established — ${sessionMin} minutes remaining', 'info', 4000); }, 1000);` : ''}
 })();

@@ -1,7 +1,14 @@
 /** Shared shape of a portal, used by the builder, the share link and the DB. */
+import type { LockPayload } from './lock';
 
 export interface PortalConfig {
-  /** Embeddable document URL (already run through toEmbedUrl). */
+  /**
+   * Embeddable document URL (already run through toEmbedUrl).
+   *
+   * Empty when the portal is password-locked: the URL then lives only inside
+   * `p`, encrypted, so that neither the share link nor the generated file
+   * carries it in the clear.
+   */
   u: string;
   /** Document title. */
   t: string;
@@ -17,6 +24,11 @@ export interface PortalConfig {
   w: string;
   /** Feature bitmask over FEATURE_ORDER. */
   f: number;
+  /**
+   * Password lock. Present only when the portal is locked, in which case `u`
+   * is empty and the real URL is recoverable from this and nothing else.
+   */
+  p?: LockPayload | null;
 }
 
 /**
