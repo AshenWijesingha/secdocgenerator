@@ -31,6 +31,11 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        # Playwright is a devDependency for the browser test suites, which this
+        # workflow never runs. Skipping its postinstall keeps ~150 MB of browser
+        # downloads out of a build that only needs `next build`.
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
         run: npm ci
 
       - name: Build static export
